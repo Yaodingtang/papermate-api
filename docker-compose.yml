@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: papermate-postgres
+    environment:
+      POSTGRES_USER: papermate
+      POSTGRES_PASSWORD: papermate123
+      POSTGRES_DB: papermate
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U papermate"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: papermate-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: papermate-api
+    ports:
+      - "8100:8100"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://papermate:papermate123@postgres:5432/papermate
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: papermate-jwt-secret-key-2024-very-long-and-secure
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRE_HOURS: 168
+      DEEPSEEK_API_KEY: sk-285bbd23730b4fb9b985afbb6912b996
+      DEEPSEEK_API_URL: https://api.deepseek.com/v1
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:3001","http://localhost:5173"]'
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./api/data:/app/data
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: papermate-web
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8100/api/v1
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
