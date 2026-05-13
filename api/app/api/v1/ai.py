@@ -5,6 +5,8 @@ from typing import List, Optional
 import httpx
 import json
 import os
+import logging
+import asyncio
 
 from app.models import (
     AIChatRequest, AIChatResponse,
@@ -13,13 +15,42 @@ from app.models import (
 )
 from app.api.deps import get_current_user
 from app.core.config import settings
+from app.services import (
+    search_papers,
+    search_arxiv,
+    search_semantic_scholar,
+    get_arxiv_popular,
+    get_trending_papers,
+    get_cached_search,
+    set_cached_search,
+    get_cached_popular,
+    set_cached_popular,
+    get_cached_recommendations,
+    set_cached_recommendations,
+)
+from app.services.arxiv_service import ArxivService
 
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
 
-# AI API 配置 - 从环境变量读取
-AI_API_URL = os.getenv("AI_API_URL", "https://spark-api-open.xf-yun.com/v1/chat/completions")
-AI_MODEL = os.getenv("AI_MODEL", "generalv3.5")
+# 使用用户 ID 作为 rate limit key，避免同一用户多次请求被限制
+def get_user_key(request: Request) -> str:
+    user = getattr(request.state, "user", None)
+    if user and hasattr(user, "id"):
+        return f"user:{user.id}"
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=get_user_key)
+logger = logging.getLogger(__name__)
+
+
+def get_ai_api_url() -> str:
+    """获取 AI API URL"""
+    return os.getenv("AI_API_URL", "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2/chat/completions")
+
+
+def get_ai_model() -> str:
+    """获取 AI 模型"""
+    return os.getenv("AI_MODEL", "astron-code-latest")
 
 
 def get_ai_api_key() -> str:
@@ -31,14 +62,19 @@ def get_ai_api_key() -> str:
 
 
 async def call_ai_api(messages: List[dict]) -> str:
-    """调用讯飞星火 API"""
+    """调用 AI API"""
     try:
         api_key = get_ai_api_key()
+        api_url = get_ai_api_url()
+        ai_model = get_ai_model()
+
+        logger.info(f"Calling AI API: {api_url} with model: {ai_model}")
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                AI_API_URL,
+                api_url,
                 json={
-                    "model": AI_MODEL,
+                    "model": ai_model,
                     "messages": messages,
                     "temperature": 0.7,
                     "max_tokens": 2000
@@ -47,14 +83,29 @@ async def call_ai_api(messages: List[dict]) -> str:
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}"
                 },
-                timeout=30.0
+                timeout=60.0
             )
+            logger.info(f"AI API response status: {response.status_code}")
+
             if response.status_code == 200:
                 data = response.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                # 支持多种响应格式
+                if "choices" in data:
+                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                elif "result" in data:
+                    return data.get("result", "")
+                elif "content" in data:
+                    return data.get("content", "")
+                elif "data" in data:
+                    return data.get("data", "")
+                else:
+                    logger.warning(f"Unknown response format: {data}")
+                    return str(data)
             else:
-                return "AI 服务暂时不可用，请稍后再试。"
+                logger.error(f"AI API error: {response.status_code} - {response.text}")
+                return f"AI 服务暂时不可用（状态码: {response.status_code}），请稍后再试。"
     except Exception as e:
+        logger.error(f"AI API call error: {str(e)}")
         return f"AI 调用出错: {str(e)}"
 
 
@@ -100,7 +151,7 @@ Transformer 在两个机器翻译任务上的实验表明，这些模型在质�
 
     return AIChatResponse(
         answer=answer,
-        conversation_id=request.conversation_id or 1,
+        conversation_id=chat_request.conversation_id or 1,
         references=[
             {"page": 1, "text": "相关原文..."}
         ]
@@ -538,7 +589,7 @@ async def compare_citations(
     user = Depends(get_current_user)
 ):
     """比较多篇论文的引用情况"""
-    
+
     # 模拟对比数据
     return {
         "papers": [
@@ -561,3 +612,179 @@ async def compare_citations(
             "unique_to_second": 12000,
         },
     }
+
+
+# === 统一搜索 API - 整合多个数据源 ===
+
+# AI/ML 相关关键词，用于优先搜索
+AI_KEYWORDS = [
+    "machine learning", "deep learning", "neural network",
+    "transformer architecture", "attention mechanism", "language model",
+    "GPT", "BERT", "LLM", "NLP", "computer vision",
+    "reinforcement learning", "generative AI", "diffusion"
+]
+
+@router.post("/search")
+@limiter.limit("60/minute")
+async def unified_search(
+    request: Request,
+    query: str,
+    limit: int = 20,
+    offset: int = 0,
+    sources: Optional[List[str]] = None,
+    category: Optional[str] = None,
+    user = Depends(get_current_user)
+):
+    """统一搜索论文 - 整合 Crossref、arXiv（带缓存）"""
+
+    # 检查缓存
+    cache_key = f"{query}_{limit}_{offset}"
+    cached = get_cached_search(cache_key)
+    if cached:
+        return {
+            "query": query,
+            "papers": cached,
+            "total": len(cached),
+            "offset": offset,
+            "limit": limit,
+            "has_more": False,
+            "cached": True,
+        }
+
+    results = []
+
+    # 智能优化查询
+    enhanced_query = query
+    if len(query.split()) <= 2 and not any(kw.lower() in query.lower() for kw in ["power", "electric", "circuit", "hardware"]):
+        is_ai_query = any(kw.lower() in query.lower() for kw in AI_KEYWORDS)
+        if not is_ai_query and len(query) < 20:
+            enhanced_query = f"{query} neural network"
+
+    # 只使用 Crossref（更快）
+    try:
+        papers = await search_papers(enhanced_query, limit=limit + 5)
+        for paper in papers:
+            standardized = standardize_paper(paper, "crossref")
+            results.append(standardized)
+    except Exception as e:
+        logger.warning(f"Crossref 搜索失败: {e}")
+
+    # 去重
+    seen = set()
+    unique_results = []
+    for paper in results:
+        key = paper.get("doi") or paper.get("title", "").lower()[:50]
+        if key and key not in seen:
+            seen.add(key)
+            unique_results.append(paper)
+
+    # 按引用数排序
+    unique_results.sort(
+        key=lambda x: x.get("citations", 0) or x.get("citation_count", 0) or 0,
+        reverse=True
+    )
+
+    # 分页
+    total = len(unique_results)
+    paginated_results = unique_results[offset:offset + limit]
+
+    # 缓存结果
+    set_cached_search(cache_key, paginated_results)
+
+    return {
+        "query": query,
+        "enhanced_query": enhanced_query if enhanced_query != query else None,
+        "papers": paginated_results,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + limit < total,
+        "cached": False,
+    }
+
+
+def standardize_paper(paper: dict, source: str) -> dict:
+    """标准化论文格式"""
+
+    # 解析作者
+    authors = paper.get("authors", [])
+    if isinstance(authors, list):
+        if authors and isinstance(authors[0], dict):
+            author_str = ", ".join([
+                a.get("name", "") or a.get("family", "")
+                for a in authors[:3]
+            ])
+        else:
+            author_str = str(authors[0]) if authors else "Unknown"
+    else:
+        author_str = str(authors)
+
+    return {
+        "id": paper.get("paper_id") or paper.get("arxiv_id") or paper.get("doi") or "",
+        "title": paper.get("title", ""),
+        "authors": author_str,
+        "year": paper.get("year"),
+        "venue": paper.get("venue") or paper.get("journal") or "arXiv",
+        "abstract": paper.get("abstract", ""),
+        "doi": paper.get("doi", ""),
+        "arxiv_id": paper.get("arxiv_id", ""),
+        "citations": paper.get("citation_count", 0) or paper.get("citations", 0),
+        "source": source,
+        "url": paper.get("url") or paper.get("arxiv_url") or paper.get("pdf_url", ""),
+    }
+
+
+@router.get("/search/popular")
+@limiter.limit("30/minute")
+async def get_popular_papers(
+    request: Request,
+    limit: int = 10,
+    user = Depends(get_current_user)
+):
+    """获取热门论文（带缓存）"""
+
+    # 检查缓存
+    cached = get_cached_popular()
+    if cached:
+        return {
+            "papers": cached[:limit],
+            "total": len(cached),
+            "cached": True,
+        }
+
+    try:
+        # 只搜索一个关键词，减少请求时间
+        papers = await search_papers("machine learning deep learning", limit=limit + 5)
+
+        all_papers = []
+        for paper in papers:
+            standardized = standardize_paper(paper, "crossref")
+            all_papers.append(standardized)
+
+        # 去重
+        seen = set()
+        unique = []
+        for p in all_papers:
+            key = p.get("title", "").lower()[:50]
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(p)
+
+        # 按引用数排序
+        unique.sort(key=lambda x: x.get("citations", 0), reverse=True)
+
+        # 缓存结果
+        set_cached_popular(unique[:limit])
+
+        return {
+            "papers": unique[:limit],
+            "total": len(unique),
+            "cached": False,
+        }
+    except Exception as e:
+        logger.error(f"获取热门论文失败: {e}")
+        return {
+            "papers": [],
+            "total": 0,
+            "error": str(e),
+        }
