@@ -141,6 +141,7 @@ def get_fallback_recommendations() -> List[dict]:
 
 @router.get("/recommendations")
 async def get_daily_recommendations(
+    limit: int = 5,
     user = Depends(get_current_user)
 ):
     """获取每日推荐论文"""
@@ -149,7 +150,7 @@ async def get_daily_recommendations(
     if hasattr(user, 'research_interests') and user.research_interests:
         interests = user.research_interests
 
-    recommendations = await get_real_recommendations(interests=interests, limit=5)
+    recommendations = await get_real_recommendations(interests=interests, limit=limit)
 
     return {
         "date": datetime.now().strftime("%Y-%m-%d"),
