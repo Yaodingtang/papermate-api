@@ -34,9 +34,9 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1", tags=["认证"])
-app.include_router(papers.router, prefix="/api/v1/papers", tags=["论文"])
+app.include_router(papers.router, prefix="/api/v1", tags=["论文"])
 app.include_router(annotations.router, prefix="/api/v1", tags=["批注"])
-app.include_router(cards.router, prefix="/api/v1/cards", tags=["知识卡片"])
+app.include_router(cards.router, prefix="/api/v1", tags=["知识卡片"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["AI功能"])
 app.include_router(daily.router, prefix="/api/v1/daily", tags=["每日推送"])
 app.include_router(stats.router, prefix="/api/v1/stats", tags=["统计"])
