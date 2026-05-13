@@ -8,6 +8,7 @@ from sqlalchemy import select, func
 import magic
 import os
 import tempfile
+import logging
 
 from app.api.deps import get_db, get_current_user
 from app.models import User, Paper
@@ -16,6 +17,7 @@ from app.services import PDFParser, parse_pdf, get_paper_metadata, search_papers
 
 router = APIRouter(prefix="/papers", tags=["论文"])
 limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
 
 # 允许的 MIME 类型
 ALLOWED_MIME_TYPES = {
@@ -227,7 +229,8 @@ async def parse_paper_pdf(
             "references_count": len(parsed_data.get("references", [])),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF 解析失败: {str(e)}")
+        logger.error(f"PDF parsing failed for paper {paper_id}: {e}")
+        raise HTTPException(status_code=500, detail="PDF 解析失败，请检查文件格式")
 
 
 @router.get("/{paper_id}/text")
@@ -260,7 +263,8 @@ async def get_paper_text(
                 "end_page": end_page or parser._doc and len(parser._doc),
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"文本提取失败: {str(e)}")
+        logger.error(f"Text extraction failed for paper {paper_id}: {e}")
+        raise HTTPException(status_code=500, detail="文本提取失败，请检查文件格式")
 
 
 @router.get("/{paper_id}/pages/{page_num}")

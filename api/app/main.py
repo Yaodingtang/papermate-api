@@ -6,6 +6,7 @@ from slowapi.errors import RateLimitExceeded
 import os
 
 from app.core.database import create_db_and_tables
+from app.core.config import settings
 from app.api.v1 import auth, papers, annotations, cards, ai, daily, stats
 
 # 创建速率限制器
@@ -22,10 +23,10 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS 配置
+# CORS 配置 - 使用配置文件中的允许列表
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

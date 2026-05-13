@@ -56,19 +56,19 @@ async def get_current_active_user(
     return current_user
 
 
-def get_optional_user(
+async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
     db: AsyncSession = Depends(get_db),
 ) -> Optional[User]:
     """Get optional user (for public endpoints)."""
     if not credentials:
         return None
-    
+
     token = credentials.credentials
     user_id = decode_access_token(token)
-    
+
     if not user_id:
         return None
-    
-    result = db.execute(select(User).where(User.id == user_id))
+
+    result = await db.execute(select(User).where(User.id == user_id))
     return result.scalar_one_or_none()
