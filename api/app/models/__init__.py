@@ -399,10 +399,11 @@ class DailyRecommendation(SQLModel):
 
 
 class DailySettings(SQLModel):
-    enabled: bool
-    time: str
-    channel: str
-    count: int = 5
+    push_enabled: Optional[bool] = True
+    push_time: Optional[str] = "09:00"
+    push_channel: Optional[str] = "app"
+    push_count: Optional[int] = 5
+    sources: Optional[dict] = None
 
 
 class DailyInterests(SQLModel):

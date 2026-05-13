@@ -166,9 +166,11 @@ async def update_daily_settings(
 ):
     """更新推送设置"""
 
+    # 这里应该保存到数据库，暂时返回成功
     return {
         "message": "设置已更新",
-        "settings": settings
+        "settings": settings,
+        "user_id": user.id,
     }
 
 
@@ -179,9 +181,11 @@ async def update_research_interests(
 ):
     """更新研究兴趣"""
 
+    # 这里应该保存到数据库，暂时返回成功
     return {
         "message": "研究兴趣已更新",
-        "interests": interests.interests
+        "interests": interests.interests,
+        "user_id": user.id,
     }
 
 
