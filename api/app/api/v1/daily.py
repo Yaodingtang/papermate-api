@@ -26,20 +26,21 @@ async def get_real_recommendations(
 ) -> List[dict]:
     """从真实数据源获取推荐论文（带缓存）"""
 
-    # 检查缓存
+    # 检查缓存 - 缓存了足够多的论文，按需返回
     cached = get_cached_recommendations()
-    if cached:
-        logger.info("Using cached recommendations")
+    if cached and len(cached) >= limit:
+        logger.info(f"Using cached recommendations, returning {limit} papers")
         return cached[:limit]
 
     recommendations = []
 
-    # 默认搜索关键词
+    # 默认搜索关键词 - 搜索更多论文以便缓存
     default_query = "machine learning deep learning neural network"
+    search_limit = max(limit, 15)  # 至少搜索15篇用于缓存
 
     try:
         # 只搜索一次，减少请求时间
-        papers = await search_papers(default_query, limit=limit + 5)
+        papers = await search_papers(default_query, limit=search_limit)
 
         # 去重
         seen = set()
@@ -57,7 +58,7 @@ async def get_real_recommendations(
         )
 
         # 格式化推荐结果
-        for i, paper in enumerate(unique_papers[:limit]):
+        for i, paper in enumerate(unique_papers[:search_limit]):
             authors = paper.get("authors", [])
             if isinstance(authors, list):
                 if authors and isinstance(authors[0], dict):
