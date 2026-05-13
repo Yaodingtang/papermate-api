@@ -5,7 +5,7 @@
 - **前端**: http://localhost:3001 (Next.js 14)
 - **后端**: http://localhost:8100 (FastAPI)
 - **数据库**: SQLite (`data/papermate.db`)
-- **测试日期**: 2026-05-12
+- **测试日期**: 2026-05-13
 
 ---
 

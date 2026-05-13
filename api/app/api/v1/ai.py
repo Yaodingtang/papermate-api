@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from typing import List, Optional
 import httpx
 import json
+import os
 
 from app.models import (
     AIChatRequest, AIChatResponse,
@@ -9,17 +12,28 @@ from app.models import (
     CardCreate, CardRead
 )
 from app.api.deps import get_current_user
+from app.core.config import settings
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
-# AI API 配置
-AI_API_URL = "https://spark-api-open.xf-yun.com/v1/chat/completions"
-AI_MODEL = "generalv3.5"
+# AI API 配置 - 从环境变量读取
+AI_API_URL = os.getenv("AI_API_URL", "https://spark-api-open.xf-yun.com/v1/chat/completions")
+AI_MODEL = os.getenv("AI_MODEL", "generalv3.5")
+
+
+def get_ai_api_key() -> str:
+    """获取 AI API Key，优先从环境变量，其次从配置"""
+    api_key = os.getenv("AI_API_KEY") or settings.AI_API_KEY
+    if not api_key:
+        raise ValueError("AI_API_KEY 未配置，请设置环境变量或在 .env 文件中配置")
+    return api_key
 
 
 async def call_ai_api(messages: List[dict]) -> str:
     """调用讯飞星火 API"""
     try:
+        api_key = get_ai_api_key()
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 AI_API_URL,
@@ -30,7 +44,8 @@ async def call_ai_api(messages: List[dict]) -> str:
                     "max_tokens": 2000
                 },
                 headers={
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}"
                 },
                 timeout=30.0
             )
@@ -44,8 +59,10 @@ async def call_ai_api(messages: List[dict]) -> str:
 
 
 @router.post("/chat", response_model=AIChatResponse)
+@limiter.limit("30/minute")
 async def chat_with_paper(
-    request: AIChatRequest,
+    request: Request,
+    chat_request: AIChatRequest,
     user = Depends(get_current_user)
 ):
     """与 AI 讨论论文"""
@@ -76,7 +93,7 @@ Transformer 在两个机器翻译任务上的实验表明，这些模型在质�
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": f"以下是论文内容:\n{paper_context}"},
-        {"role": "user", "content": request.question}
+        {"role": "user", "content": chat_request.question}
     ]
 
     answer = await call_ai_api(messages)
@@ -276,4 +293,271 @@ async def check_paper(
             {"type": "style", "severity": "warning", "line": 5, "text": "very good 改为 significant", "suggestion": "significant"},
             {"type": "citation", "severity": "info", "line": 8, "text": "缺少引用", "suggestion": "引用 Transformer 原论文"},
         ]
+    }
+
+
+# === 智能摘要功能 ===
+
+@router.post("/summary/generate")
+@limiter.limit("10/minute")
+async def generate_summary(
+    request: Request,
+    paper_id: str,
+    summary_type: str = "brief",  # brief, detailed, bullet
+    user = Depends(get_current_user)
+):
+    """生成论文智能摘要"""
+    
+    # 根据摘要类型选择不同的提示词
+    prompts = {
+        "brief": """请为以下论文生成一个简洁的摘要（100-150字），包括：
+1. 研究问题
+2. 主要方法
+3. 核心结论
+请用简洁、专业的语言概括。""",
+        
+        "detailed": """请为以下论文生成一个详细的摘要（300-500字），包括：
+1. 研究背景与动机
+2. 研究问题
+3. 主要方法与创新点
+4. 实验设计与结果
+5. 结论与贡献
+请用学术、专业的语言撰写。""",
+        
+        "bullet": """请为以下论文生成要点摘要，以列表形式呈现：
+- 研究问题：...
+- 核心方法：...
+- 主要创新：...
+- 关键结果：...
+- 重要结论：...
+请简洁明了地列出要点。"""
+    }
+    
+    system_prompt = prompts.get(summary_type, prompts["brief"])
+    
+    # 模拟论文内容（实际应从数据库获取）
+    paper_content = """
+论文标题: Attention Is All You Need
+作者: Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser, Polosukhin
+年份: 2017
+发表: NeurIPS 2017
+
+摘要: 我们提出了一种新的简单网络架构——Transformer，完全基于注意力机制，摒弃了循环和卷积。
+Transformer 在两个机器翻译任务上的实验表明，这些模型在质量上更优越，同时更具并行性，训练时间显著减少。
+
+主要内容:
+1. 自注意力机制 (Self-Attention)
+2. 多头注意力 (Multi-Head Attention)
+3. 位置编码 (Positional Encoding)
+4. 编码器-解码器架构
+"""
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"请为以下论文生成摘要:\n\n{paper_content}"}
+    ]
+    
+    summary = await call_ai_api(messages)
+    
+    return {
+        "paper_id": paper_id,
+        "summary_type": summary_type,
+        "summary": summary,
+        "generated_at": "2024-01-01T00:00:00Z",
+    }
+
+
+@router.post("/summary/translate")
+@limiter.limit("10/minute")
+async def translate_summary(
+    request: Request,
+    text: str,
+    target_lang: str = "zh",  # zh, en
+    user = Depends(get_current_user)
+):
+    """翻译摘要"""
+    
+    lang_prompt = {
+        "zh": "请将以下英文摘要翻译成中文，保持学术风格：",
+        "en": "Please translate the following Chinese abstract to English, maintaining academic style:"
+    }
+    
+    system_prompt = lang_prompt.get(target_lang, lang_prompt["zh"])
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ]
+    
+    translated = await call_ai_api(messages)
+    
+    return {
+        "original": text,
+        "translated": translated,
+        "target_lang": target_lang,
+    }
+
+
+@router.post("/summary/keypoints")
+@limiter.limit("10/minute")
+async def extract_keypoints(
+    request: Request,
+    paper_id: str,
+    user = Depends(get_current_user)
+):
+    """提取论文关键点"""
+    
+    system_prompt = """请从以下论文中提取关键点，包括：
+1. 核心概念（3-5个）
+2. 关键方法（2-3个）
+3. 重要发现（2-3个）
+4. 局限性（1-2个）
+
+请以结构化的方式返回。"""
+    
+    # 模拟论文内容
+    paper_content = """
+论文标题: Attention Is All You Need
+主要内容: Transformer架构，自注意力机制，多头注意力，位置编码
+"""
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": paper_content}
+    ]
+    
+    keypoints = await call_ai_api(messages)
+    
+    return {
+        "paper_id": paper_id,
+        "keypoints": keypoints,
+        "concepts": ["自注意力", "多头注意力", "位置编码", "Transformer"],
+        "methods": ["缩放点积注意力", "多头注意力机制"],
+        "findings": ["在翻译任务上超越RNN", "训练速度显著提升"],
+        "limitations": ["计算复杂度O(n²)", "对位置编码敏感"],
+    }
+
+
+# === 引用追踪功能 ===
+
+@router.get("/citations/{paper_id}")
+@limiter.limit("20/minute")
+async def get_citation_network(
+    request: Request,
+    paper_id: str,
+    depth: int = 1,
+    user = Depends(get_current_user)
+):
+    """获取论文引用网络"""
+    
+    # 模拟引用网络数据
+    return {
+        "paper_id": paper_id,
+        "paper_title": "Attention Is All You Need",
+        "citation_count": 89000,
+        "reference_count": 15,
+        "cited_by": [
+            {
+                "id": "paper_1",
+                "title": "BERT: Pre-training of Deep Bidirectional Transformers",
+                "authors": "Devlin et al.",
+                "year": 2018,
+                "citations": 75000,
+            },
+            {
+                "id": "paper_2",
+                "title": "GPT-3: Language Models are Few-Shot Learners",
+                "authors": "Brown et al.",
+                "year": 2020,
+                "citations": 45000,
+            },
+            {
+                "id": "paper_3",
+                "title": "Vision Transformer",
+                "authors": "Dosovitskiy et al.",
+                "year": 2020,
+                "citations": 35000,
+            },
+        ],
+        "references": [
+            {
+                "id": "ref_1",
+                "title": "Sequence to Sequence Learning with Neural Networks",
+                "authors": "Sutskever et al.",
+                "year": 2014,
+            },
+            {
+                "id": "ref_2",
+                "title": "Neural Machine Translation by Jointly Learning to Align and Translate",
+                "authors": "Bahdanau et al.",
+                "year": 2014,
+            },
+        ],
+        "network_depth": depth,
+    }
+
+
+@router.get("/citations/trending")
+async def get_trending_citations(
+    field: str = "AI",
+    limit: int = 10,
+    user = Depends(get_current_user)
+):
+    """获取领域内热门被引论文"""
+    
+    # 模拟热门论文数据
+    return {
+        "field": field,
+        "papers": [
+            {
+                "id": "trend_1",
+                "title": "GPT-4 Technical Report",
+                "authors": "OpenAI",
+                "year": 2023,
+                "citations_growth": "+250%",
+                "recent_citations": 5000,
+            },
+            {
+                "id": "trend_2",
+                "title": "LLaMA: Open and Efficient Foundation Language Models",
+                "authors": "Touvron et al.",
+                "year": 2023,
+                "citations_growth": "+180%",
+                "recent_citations": 3500,
+            },
+        ],
+        "period": "last_30_days",
+    }
+
+
+@router.post("/citations/compare")
+@limiter.limit("10/minute")
+async def compare_citations(
+    request: Request,
+    paper_ids: list[str],
+    user = Depends(get_current_user)
+):
+    """比较多篇论文的引用情况"""
+    
+    # 模拟对比数据
+    return {
+        "papers": [
+            {
+                "id": paper_ids[0] if len(paper_ids) > 0 else "paper_1",
+                "title": "Attention Is All You Need",
+                "total_citations": 89000,
+                "year_over_year": "+15%",
+            },
+            {
+                "id": paper_ids[1] if len(paper_ids) > 1 else "paper_2",
+                "title": "BERT",
+                "total_citations": 75000,
+                "year_over_year": "+10%",
+            },
+        ],
+        "comparison": {
+            "common_citations": 1200,
+            "unique_to_first": 15000,
+            "unique_to_second": 12000,
+        },
     }

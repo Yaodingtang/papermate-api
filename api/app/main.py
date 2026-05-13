@@ -1,9 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import os
 
 from app.core.database import create_db_and_tables
 from app.api.v1 import auth, papers, annotations, cards, ai, daily, stats
+
+# 创建速率限制器
+limiter = Limiter(key_func=get_remote_address)
 
 # 创建应用
 app = FastAPI(
@@ -11,6 +17,10 @@ app = FastAPI(
     description="智能论文管理平台后端 API",
     version="1.0.0"
 )
+
+# 添加速率限制
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS 配置
 app.add_middleware(
@@ -47,5 +57,6 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+@limiter.exempt
+async def health_check(request: Request):
     return {"status": "healthy"}
